@@ -1,0 +1,10 @@
+package practice1;
+
+@SpringBootApplication
+public class springbootpractice {
+
+	public static void main(String[] args) {
+		
+	}
+
+}

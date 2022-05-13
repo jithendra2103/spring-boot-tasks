@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<workingSetManager>
+<workingSet editPageId="org.eclipse.jdt.internal.ui.DynamicSourcesWorkingSet" factoryID="org.eclipse.ui.internal.WorkingSetFactory" id="1649681182478_0" label="Java Main Sources" name="Java Main Sources"/>
+<workingSet editPageId="org.eclipse.jdt.internal.ui.DynamicSourcesWorkingSet" factoryID="org.eclipse.ui.internal.WorkingSetFactory" id="1649681182572_1" label="Java Test Sources" name="Java Test Sources"/>
+<workingSet editPageId="org.eclipse.ui.resourceWorkingSetPage" factoryID="org.eclipse.ui.internal.WorkingSetFactory" id="1651144459527_3" label="empower" name="empower">
+<item factoryID="org.eclipse.ui.internal.model.ResourceFactory" path="/EmPower" type="4"/>
+<item factoryID="org.eclipse.ui.internal.model.ResourceFactory" path="/rule-engine-proto" type="4"/>
+<item factoryID="org.eclipse.ui.internal.model.ResourceFactory" path="/rules-engine" type="4"/>
+<item factoryID="org.eclipse.ui.internal.model.ResourceFactory" path="/mongo-client" type="4"/>
+<item factoryID="org.eclipse.ui.internal.model.ResourceFactory" path="/fcrr-service" type="4"/>
+<item factoryID="org.eclipse.ui.internal.model.ResourceFactory" path="/common" type="4"/>
+<item factoryID="org.eclipse.ui.internal.model.ResourceFactory" path="/bre" type="4"/>
+<item factoryID="org.eclipse.ui.internal.model.ResourceFactory" path="/bmc" type="4"/>
+<item factoryID="org.eclipse.ui.internal.model.ResourceFactory" path="/ingenium-integration" type="4"/>
+</workingSet>
+<workingSet aggregate="true" factoryID="org.eclipse.ui.internal.WorkingSetFactory" id="1649681188512_2" label="Window Working Set" name="Aggregate for window 1649681188512"/>
+</workingSetManager>

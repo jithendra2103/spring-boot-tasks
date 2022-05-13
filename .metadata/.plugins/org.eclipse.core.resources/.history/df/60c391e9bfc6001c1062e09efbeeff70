@@ -1,0 +1,1344 @@
+package ai.lumiq.empower.bmc.createreceipt;
+
+import static ai.lumiq.empower.bmc.utils.BNCConstants.AUTO_APPROVAL_BNC;
+import static ai.lumiq.empower.bmc.utils.BNCConstants.BASE_FILE_PATH;
+import static ai.lumiq.empower.bmc.utils.BNCConstants.CREDITED;
+import static ai.lumiq.empower.bmc.utils.BNCConstants.HEADERS;
+import static ai.lumiq.empower.bmc.utils.BNCConstants.KEYS_TO_INSERT_IN_DB;
+import static ai.lumiq.empower.bmc.utils.BNCConstants.MANUAL_APPROVAL_BNC;
+import static ai.lumiq.empower.bmc.utils.BNCConstants.PAYMENT_METHOD_CASH;
+import static ai.lumiq.empower.bmc.utils.BNCConstants.PAYMENT_METHOD_CHEQUE_LOCAL_AT_PAR;
+import static ai.lumiq.empower.bmc.utils.BNCConstants.PAYMENT_METHOD_CHEQUE_OUTSTATION;
+import static ai.lumiq.empower.bmc.utils.BNCConstants.PAYMENT_METHOD_DEMAND_DRAFT_LOCAL_AT_PAR;
+import static ai.lumiq.empower.bmc.utils.BNCConstants.PAYMENT_METHOD_DEMAND_DRAFT_OUTSTATION;
+import static ai.lumiq.empower.bmc.utils.BNCConstants.PIPE_DELIMETER;
+import static ai.lumiq.empower.bmc.utils.BNCConstants.RECEIPT_STATUS_BANKED;
+import static ai.lumiq.empower.bmc.utils.BNCConstants.RECEIPT_STATUS_REALIZED;
+import static ai.lumiq.empower.bmc.utils.BNCConstants.VERSION_V1;
+
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+
+import javax.servlet.http.HttpServletRequest;
+import javax.transaction.Transactional;
+
+import org.apache.commons.codec.binary.StringUtils;
+import org.json.JSONArray;
+import org.json.JSONObject;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.MessageSource;
+import org.springframework.context.i18n.LocaleContextHolder;
+import org.springframework.core.io.FileSystemResource;
+import org.springframework.core.io.Resource;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.DeleteMapping;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.multipart.MultipartFile;
+
+import com.google.gson.JsonObject;
+
+import ai.lumiq.empower.bmc.db.entities.AuditTrailEntity;
+import ai.lumiq.empower.bmc.db.entities.BulkReceiptFileEntity;
+import ai.lumiq.empower.bmc.db.entities.FileLogEntity;
+import ai.lumiq.empower.bmc.db.entities.ParkingTableResponse;
+import ai.lumiq.empower.bmc.db.entities.ParkingTableSearch;
+import ai.lumiq.empower.bmc.db.entities.ReconTableEntity;
+import ai.lumiq.empower.bmc.db.repository.BulkReceiptUploadRepository;
+import ai.lumiq.empower.bmc.db.repository.File1Repository;
+import ai.lumiq.empower.bmc.db.repository.File3Repository;
+import ai.lumiq.empower.bmc.db.repository.FileLogRepository;
+import ai.lumiq.empower.bmc.db.repository.ReconTableRepository;
+import ai.lumiq.empower.bmc.exceptionhandler.RequestValidationException;
+import ai.lumiq.empower.bmc.kafka.File3Producer;
+import ai.lumiq.empower.bmc.model.ApproveReceiptResponse;
+import ai.lumiq.empower.bmc.model.BankDetailReq;
+import ai.lumiq.empower.bmc.model.BankDetailResponse;
+import ai.lumiq.empower.bmc.model.BankDetailResponse.IngMicrIfscResp;
+import ai.lumiq.empower.bmc.model.BankFileReaderRequest;
+import ai.lumiq.empower.bmc.model.BulkReceiptLogAllDataResponse;
+import ai.lumiq.empower.bmc.model.CSVUploadResponse;
+import ai.lumiq.empower.bmc.model.ChequeBounceRequest;
+import ai.lumiq.empower.bmc.model.ChequeBounceResponse;
+import ai.lumiq.empower.bmc.model.ChequeBounceUpdateDetailsRequest;
+import ai.lumiq.empower.bmc.model.ChequeBounceUpdateDetailsResponse;
+import ai.lumiq.empower.bmc.model.DeleteReceiptsResponse;
+import ai.lumiq.empower.bmc.model.DepositSlipPdfRequest;
+import ai.lumiq.empower.bmc.model.DepositSlipResponse;
+import ai.lumiq.empower.bmc.model.DepositSlipSearch;
+import ai.lumiq.empower.bmc.model.DepositSlipSearchRequest;
+import ai.lumiq.empower.bmc.model.DepositSlipSearchResponse;
+import ai.lumiq.empower.bmc.model.File1UploadResponse;
+import ai.lumiq.empower.bmc.model.FileLogAllDataResponse;
+import ai.lumiq.empower.bmc.model.FileLogResponse;
+import ai.lumiq.empower.bmc.model.FileLogSearchRequest;
+import ai.lumiq.empower.bmc.model.FileNameParser;
+import ai.lumiq.empower.bmc.model.HubMasterAllDataResponse;
+import ai.lumiq.empower.bmc.model.HubMasterGetResponse;
+import ai.lumiq.empower.bmc.model.ParkingTableRESTResponse;
+import ai.lumiq.empower.bmc.model.ParkingTableUpdateResponse;
+import ai.lumiq.empower.bmc.model.PaymentInstrumentDataResponse;
+import ai.lumiq.empower.bmc.model.PushSiNachDataRequest;
+import ai.lumiq.empower.bmc.model.ReceiptApprovalRequest;
+import ai.lumiq.empower.bmc.model.ReceiptCancelRequest;
+import ai.lumiq.empower.bmc.model.ReceiptCancelResponse;
+import ai.lumiq.empower.bmc.model.ReceiptDetailsDataResponse;
+import ai.lumiq.empower.bmc.model.ReceiptSearch;
+import ai.lumiq.empower.bmc.model.RenewalValidationReq;
+import ai.lumiq.empower.bmc.model.RenewalValidationResponse;
+import ai.lumiq.empower.bmc.model.RetailCash;
+import ai.lumiq.empower.bmc.model.ReturnInstDetailReq;
+import ai.lumiq.empower.bmc.model.ReturnInstDetailResponse;
+import ai.lumiq.empower.bmc.model.TransferFundRequest;
+import ai.lumiq.empower.bmc.model.VBGuidelineValidationRequest;
+import ai.lumiq.empower.bmc.model.VBGuidelineValidationResponse;
+import ai.lumiq.empower.bmc.model.ValidationCallingSheet;
+import ai.lumiq.empower.bmc.rest.GenericRESTTemplate;
+import ai.lumiq.empower.bmc.rest.UpdateStatusRequest;
+import ai.lumiq.empower.bmc.rest.external.File1UploadWebServiceHelper;
+import ai.lumiq.empower.bmc.rest.external.File3UploadWebServiceHelper;
+import ai.lumiq.empower.bmc.s3.AwsS3Service;
+import ai.lumiq.empower.bmc.service.AccountingService;
+import ai.lumiq.empower.bmc.service.CSVReaderService;
+import ai.lumiq.empower.bmc.service.DirDebitPendingReconFileGenService;
+import ai.lumiq.empower.bmc.service.File1ScheduledService;
+import ai.lumiq.empower.bmc.service.FileLogService;
+import ai.lumiq.empower.bmc.service.MisGenerationService;
+import ai.lumiq.empower.bmc.service.ParkingTableService;
+import ai.lumiq.empower.bmc.service.PendingReceiptsFileGeneration;
+import ai.lumiq.empower.bmc.service.ReconsilationService;
+import ai.lumiq.empower.bmc.service.RenewalService;
+import ai.lumiq.empower.bmc.service.TimeScheduledServices;
+import ai.lumiq.empower.bmc.utils.DateUtil;
+import ai.lumiq.empower.bmc.utils.PaymentMethodUtility;
+import ai.lumiq.empower.constant.Constants;
+import ai.lumiq.empower.exception.ResourceNotFoundException;
+import ai.lumiq.empower.proto.bmc.ReceiptCreateRequest;
+import ai.lumiq.empower.proto.bmc.ReceiptCreateRequest.PaymentTransactionResponse;
+import ai.lumiq.empower.proto.bmc.ReceiptCreateRequest.SearchResponse;
+
+@RestController
+@RequestMapping("/empower")
+public class ReceiptController {
+	
+	private static final Logger LOGGER = LoggerFactory.getLogger(ReceiptController.class);
+
+	@Autowired
+	ReceiptService receiptService;
+	
+	@Autowired
+	ReconsilationService reconService;
+	
+	@Autowired
+	CSVReaderService csvReaderService;
+
+	@Autowired
+	MessageSource messageSource;
+	
+	@Autowired
+	ParkingTableService parkingTableService;
+	
+	@Autowired
+	ReceiptDetailsRepository receiptDetailsRepo;
+	
+	@Autowired
+	FileLogService fileLogService;
+	
+	@Autowired
+	ReconTableRepository reconTableRepo;
+	
+	@Autowired
+	RenewalService renewalService;
+	
+	@Autowired
+	FileLogRepository fileLogRepository;
+
+	@Autowired
+	AccountingService accountingService;
+	
+	@Autowired
+	GenericRESTTemplate restTemplate;
+
+	@Autowired
+	MisGenerationService misGenerationService;
+	
+	@Autowired
+	PendingReceiptsFileGeneration pendingReceiptFileGen;
+
+	@Autowired
+	TimeScheduledServices timeScheduledService;
+	
+	@Autowired
+	AwsS3Service awsService;
+	
+	@Autowired
+	BulkReceiptUploadRepository bulkReceiptRepo;
+	
+	@Value("${workflow.datapushed.status.uri}")
+	String dataPushAPIUrl;
+
+	@Autowired
+	File1Repository file1Repository;
+
+	@Autowired
+	File3Repository file3Repository;
+
+	@Autowired
+	File1UploadWebServiceHelper file1UploaderHelper;
+
+	@Autowired
+	File3UploadWebServiceHelper file3UploaderHelper;
+
+	@Autowired
+	File3Producer file3Producer;
+
+	@Value("${spring.datasource.url}")
+	String postgresURL;
+
+	@Value("${spring.datasource.username}")
+	String postgresUserName;
+
+	@Value("${spring.datasource.password}")
+	String postgresPassword;
+
+	@Value("${ingenium.authorization}")
+	String ingeniumAuthToken;
+	
+	@Autowired
+	DirDebitPendingReconFileGenService dirDebFileGenService;
+	
+	@Autowired
+	PaymentInstrumentRepository paymentInstrumentRepo;
+	
+	@Value("${empower.ingenium.service.topup.uri}")
+	private String ingeniumTopupURI;
+	
+	@Value("${empower.ingenium.service.loan.amount.uri}")
+	private String ingeniumLoanAmtURI;
+	
+	@Value("${empower.ingenium.service.cpdt.ptd.uri}")
+	private String ingeniumServiceCPD_PTDUri;
+	
+	@Autowired
+	File1ScheduledService file1Service;
+	
+	@PostMapping(path = "/bnc/create/receipt/v1", produces = MediaType.APPLICATION_JSON_VALUE)
+	public ResponseEntity<PaymentTransactionResponse> getAllData(@RequestBody ReceiptCreateRequest request) {
+		PaymentTransactionResponse response = receiptService.createReceipt(request);
+		return ResponseEntity.ok(response);
+	}
+
+
+	@PostMapping(path = "/bnc/update/receipt/v1", produces = MediaType.APPLICATION_JSON_VALUE)
+	public ResponseEntity<PaymentTransactionResponse> updateStatus(@RequestBody ReceiptCreateRequest request) {
+		PaymentTransactionResponse response = receiptService.updateReciept(request);
+		return ResponseEntity.ok(response);
+	}
+
+	@PostMapping(path = "/bnc/insert/recon/data/v1", produces = MediaType.APPLICATION_JSON_VALUE)
+	public ResponseEntity<String> insertData(@RequestBody ReconTableEntity request) {
+		String response = receiptService.saveReconData(request);
+		return ResponseEntity.ok(response);
+	}
+
+	@GetMapping(path = "/bnc/get/receipt/v1/{paymentTxnId}", produces = MediaType.APPLICATION_JSON_VALUE)
+	public ResponseEntity<PaymentTransactionResponse> getReceiptData(@PathVariable String paymentTxnId) {
+		PaymentTransactionResponse response = receiptService.fetchDataByPaymentId(paymentTxnId);
+		return ResponseEntity.ok(response);
+	}
+	
+	@GetMapping(path = "/bnc/get/all/hub/master/v1", produces = MediaType.APPLICATION_JSON_VALUE)
+	public ResponseEntity<HubMasterAllDataResponse> getAllHubMasterData() {
+		HubMasterAllDataResponse response = receiptService.getAllHubMasterData();
+		return ResponseEntity.ok(response);
+	}
+	
+	@GetMapping(path = "/bnc/get/hubmaster/v1/{hubcode}", produces = MediaType.APPLICATION_JSON_VALUE)
+	public ResponseEntity<HubMasterGetResponse> getHubMasterData(@PathVariable String hubcode) {
+		HubMasterGetResponse response = receiptService.getHubMasterData(hubcode);
+		return ResponseEntity.ok(response);
+	}	
+	
+	@GetMapping(path = "/bnc/get/receipt/details/v1/{receiptId}", produces = MediaType.APPLICATION_JSON_VALUE)
+	public ResponseEntity<ReceiptDetailsDataResponse> getReceiptDetailsByReceiptId(@PathVariable String receiptId) {
+		ReceiptDetailsDataResponse response = receiptService.getReceiptDetailsData(receiptId);
+		return ResponseEntity.ok(response);
+	}
+	
+	@GetMapping(path = "/bnc/get/payment/instrument/v1/{instrumentID}", produces = MediaType.APPLICATION_JSON_VALUE)
+	public ResponseEntity<PaymentInstrumentDataResponse> getInstrumentData(@PathVariable String instrumentID) {
+		PaymentInstrumentDataResponse response = receiptService.getPaymentInstrumentData(instrumentID);
+		return ResponseEntity.ok(response);
+	}
+	
+	@GetMapping(path = "/bnc/get/parking/table/v1/{parkingTableId}", produces = MediaType.APPLICATION_JSON_VALUE)
+	public ResponseEntity<ParkingTableRESTResponse> getParkingTable(@PathVariable String parkingTableId) {
+		ParkingTableRESTResponse response = receiptService.getParkingTableData(parkingTableId);
+		return ResponseEntity.ok(response);
+	}
+	
+	@GetMapping("/bnc/get/deposit/ack/receipt/v1/{paymentTxnId}")
+    public ResponseEntity<Resource> downloadDepositAckFile(HttpServletRequest request,
+    		@PathVariable(value = "paymentTxnId") String paymentTxnId) {
+		
+		receiptService.getDepositAckPojos(paymentTxnId);
+		String fileName = paymentTxnId+"-depoitAck"+".pdf";
+		Resource resource = new FileSystemResource("./temp/"+fileName);
+
+        String contentType = null;
+        try {
+            contentType = request.getServletContext().getMimeType(resource.getFile().getAbsolutePath());
+        } catch (IOException ex) {
+        	throw new RuntimeException(ex.getMessage());
+        }
+
+        if(contentType == null) {
+            contentType = "application/octet-stream";
+        }
+
+        return ResponseEntity.ok()
+                .contentType(MediaType.parseMediaType(contentType))
+                .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"" + resource.getFilename() + "\"")
+                .body(resource);
+    }
+
+	@GetMapping("/bnc/get/deposite/slip/receipt/v1/{receiptId}")
+    public ResponseEntity<Resource> downloadDepositFile(HttpServletRequest request,
+    		@PathVariable(value = "receiptId") String receiptId) {
+		
+		String fileName = receiptId+"-deposite-slip"+".pdf";
+
+		RetailCash depositSlipData = receiptService.getDepositSlipPojos(receiptId);
+		receiptService.generateDepositeSlipPDF(depositSlipData, true, PAYMENT_METHOD_CASH, fileName, "./temp");
+		
+		Resource resource = new FileSystemResource("./temp/"+fileName);
+
+        String contentType = null;
+        try {
+            contentType = request.getServletContext().getMimeType(resource.getFile().getAbsolutePath());
+        } catch (IOException ex) {
+        	throw new RuntimeException(ex.getMessage());
+        }
+
+        if(contentType == null) {
+            contentType = "application/octet-stream";
+        }
+
+        return ResponseEntity.ok()
+                .contentType(MediaType.parseMediaType(contentType))
+                .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"" + resource.getFilename() + "\"")
+                .body(resource);
+    }
+	
+	@Transactional
+	@PostMapping("/bnc/get/deposit/slip/pdf/patch/v1")
+	public String depositSlipPatchService(@RequestBody List<String> receiptIdList) {
+
+		try {
+			int countUpdated = receiptService.updateReceiptStatus(receiptIdList); 
+			for(String receiptId: receiptIdList) {
+				ReceiptDetailsEntity rde = receiptDetailsRepo.findByReceiptId(receiptId);
+
+				//File1 and File3 Upload
+				if ((PAYMENT_METHOD_CASH).equals(rde.getModeOfReceiptInstrument())) {
+
+					reconTableRepo.updateReceiptStatusByReceiptId(RECEIPT_STATUS_REALIZED, 
+							receiptId);
+					receiptDetailsRepo.updateReceiptStatusByTxnId(RECEIPT_STATUS_REALIZED, 
+							rde.getPayment_tx_id());
+					receiptDetailsRepo.updateReceiptStatusUpdatesByPaymentInstrumentId(
+							rde.getUpdated_by(), 
+							String.valueOf(Instant.now().getEpochSecond()), 
+							rde.getPayment_inst_id());
+
+					List<ReconTableEntity> reconEn = reconTableRepo.findByReceiptId(receiptId);
+
+					receiptService.uploadFile1(reconEn.get(0));
+					receiptService.uploadFile3WithStatus(reconEn.get(0), CREDITED, DateUtil.converToDate(Instant.now().toEpochMilli()));
+
+				} else if ((PAYMENT_METHOD_DEMAND_DRAFT_OUTSTATION).equals(rde.getModeOfReceiptInstrument())
+						|| (PAYMENT_METHOD_DEMAND_DRAFT_LOCAL_AT_PAR).equals(rde.getModeOfReceiptInstrument())
+						|| (PAYMENT_METHOD_CHEQUE_OUTSTATION).equals(rde.getModeOfReceiptInstrument())
+						|| (PAYMENT_METHOD_CHEQUE_LOCAL_AT_PAR).equals(rde.getModeOfReceiptInstrument())) {
+
+					//added recon receipt status
+					reconTableRepo.updateReceiptStatusByReceiptId(RECEIPT_STATUS_BANKED, 
+							receiptId);
+					receiptDetailsRepo.updateReceiptStatusByTxnId(RECEIPT_STATUS_BANKED, 
+							rde.getPayment_tx_id());
+					receiptDetailsRepo.updateReceiptStatusUpdatesByPaymentInstrumentId(
+							rde.getUpdated_by(), 
+							String.valueOf(Instant.now().getEpochSecond()), 
+							rde.getPayment_inst_id());
+
+					List<ReconTableEntity> reconEn = reconTableRepo.findByReceiptId(receiptId);
+					receiptService.uploadFile1(reconEn.get(0));
+				} 
+			}
+		}catch (Exception e) {
+			e.printStackTrace();
+			return "Error in patching depositslip data";
+		}
+		return "Depositslip data patch sucessful";
+	}
+
+	@Transactional
+	@PostMapping("/bnc/execute/file1/patch/v1")
+	public ResponseEntity<File1UploadResponse> sendFile1Service(@RequestBody List<String> policyNumberList) {
+		File1UploadResponse response = receiptService.sendFile1Service(policyNumberList);
+		return ResponseEntity.ok(response);
+	}
+	
+	@Transactional
+	@PostMapping("/bnc/get/deposit/slip/pdf/v1")
+    public ResponseEntity<Resource> downloadDepositSlip(HttpServletRequest req,
+    		@RequestBody DepositSlipPdfRequest request,
+    		@RequestParam(required = false, name = "userId") String userId) {
+		if(request.getInstrumentIdList() == null || request.getInstrumentIdList().isEmpty()
+				|| request.getPaymentMethod() == null || request.getIsSample() == null || request.getCmsBankCode() == null
+				|| request.getHubCode() == null) {
+			throw new ResourceNotFoundException("E40020", null);
+		}
+
+		if(StringUtils.isBlank(userId)) {
+			userId = "MANUAL-DEPOSIT-SLIP-GENERATION-BNC";
+		}
+		
+		List<AuditTrailEntity> auditItemList = new ArrayList<AuditTrailEntity>();
+		
+		String instIdFirst = request.getInstrumentIdList().get(0);
+		
+		String fileName = instIdFirst+"-deposite-slip"+".pdf";
+		RetailCash depositSlipData = new RetailCash();
+		
+		String payMethod = request.getPaymentMethod();
+		String depositSlipNum = "";
+		
+		if(request.getIsSample() == false) {
+			depositSlipNum = receiptService.generateDepositSlipNum(instIdFirst,request.getHubCode(), request.getCmsBankCode());
+
+			//data insertion in deposit slip 
+			List<String> receiptIdList = receiptService.saveDepositSlipForMany(depositSlipNum, request.getInstrumentIdList(),
+					request.getHubCode(), request.getCmsBankCode(), request.getPaymentMethod(),
+					request.getReceivedDateFrom(), request.getReceivedDateTo(), userId);
+			
+			//update status of receipt in all receipts
+			int countUpdated = receiptService.updateReceiptStatus(receiptIdList); 
+			
+			for(String receiptId: receiptIdList) {
+				ReceiptDetailsEntity rde = receiptDetailsRepo.findByReceiptId(receiptId);
+				
+				/* audit-trail */
+				receiptService.addItemInAuditTrailListByReceiptList(Arrays.asList(rde),
+						"DEPOSIT-SLIP-GENERATION:MANUAL", userId,
+						String.valueOf(Instant.now().getEpochSecond()),
+						auditItemList);
+				
+				//File1 and File3 Upload
+				if ((PAYMENT_METHOD_CASH).equals(payMethod)) {
+
+					reconTableRepo.updateReceiptStatusByReceiptId(RECEIPT_STATUS_REALIZED, receiptId);
+					//receiptDetailsRepo.updateReceiptStatusByTxnId(RECEIPT_STATUS_REALIZED, rde.getPayment_tx_id());
+					//receiptDetailsRepo.updateReceiptStatusUpdatesByPaymentInstrumentId(
+					//		userId, String.valueOf(Instant.now().getEpochSecond()), rde.getPayment_inst_id());
+
+					receiptDetailsRepo.updateReceiptStatusAndAuditByInstId(
+							RECEIPT_STATUS_REALIZED, 
+							userId, 
+							String.valueOf(Instant.now().getEpochSecond()), 
+							rde.getPayment_inst_id());
+					
+					List<ReconTableEntity> reconEn = reconTableRepo.findByReceiptId(receiptId);
+					
+					receiptService.uploadFile1(reconEn.get(0));
+					receiptService.uploadFile3WithStatus(reconEn.get(0), CREDITED, DateUtil.converToDate(Instant.now().toEpochMilli()));
+
+				} else if ((PAYMENT_METHOD_DEMAND_DRAFT_OUTSTATION).equals(payMethod)
+						|| (PAYMENT_METHOD_DEMAND_DRAFT_LOCAL_AT_PAR).equals(payMethod)
+						|| (PAYMENT_METHOD_CHEQUE_OUTSTATION).equals(payMethod)
+						|| (PAYMENT_METHOD_CHEQUE_LOCAL_AT_PAR).equals(payMethod)) {
+
+					//added recon receipt status
+					reconTableRepo.updateReceiptStatusByReceiptId(RECEIPT_STATUS_BANKED, receiptId);
+					//receiptDetailsRepo.updateReceiptStatusByTxnId(RECEIPT_STATUS_BANKED, rde.getPayment_tx_id());
+
+					//receiptDetailsRepo.updateReceiptStatusUpdatesByPaymentInstrumentId(
+					//		userId, String.valueOf(Instant.now().getEpochSecond()), rde.getPayment_inst_id());
+
+					receiptDetailsRepo.updateReceiptStatusAndAuditByInstId(
+							RECEIPT_STATUS_BANKED, 
+							userId, 
+							String.valueOf(Instant.now().getEpochSecond()), 
+							rde.getPayment_inst_id());
+					
+					List<ReconTableEntity> reconEn = reconTableRepo.findByReceiptId(receiptId);
+					receiptService.uploadFile1(reconEn.get(0));
+				} 
+			}
+		}		
+		
+		depositSlipData = receiptService.getDepositSlipPojosForReceiptList(depositSlipNum, 
+				request.getInstrumentIdList(), payMethod);
+		receiptService.generateDepositeSlipPDF(depositSlipData, request.getIsSample(), payMethod, 
+				fileName, "./temp");
+		Resource resource = new FileSystemResource("./temp/"+fileName);
+        String contentType = null;
+        try {
+            contentType = req.getServletContext().getMimeType(resource.getFile().getAbsolutePath());
+        } catch (IOException ex) {
+        	throw new RuntimeException(ex.getMessage());
+        }
+
+        if(contentType == null) {
+            contentType = "application/octet-stream";
+        }
+
+        receiptService.saveAuditTrailByAuditList(auditItemList);
+        
+        return ResponseEntity.ok()
+                .contentType(MediaType.parseMediaType(contentType))
+                .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"" + resource.getFilename() + "\"")
+                .body(resource);
+    }
+	
+	@PostMapping(path = "/bnc/search/receipt/v1", produces = MediaType.APPLICATION_JSON_VALUE)
+	public ResponseEntity<SearchResponse> searchReceipt(@RequestBody ReceiptSearch request,
+			@RequestParam(required = false, name = "pageNum", defaultValue = "0") int pageNum) {
+		SearchResponse response = receiptService.searchReceipt(request, pageNum);
+		return ResponseEntity.ok(response);
+	}
+	
+	@PostMapping(path = "/bnc/parking/table/search/v1", produces = MediaType.APPLICATION_JSON_VALUE)
+	public ResponseEntity<ParkingTableResponse> searchParkingTable(@RequestBody ParkingTableSearch request,
+			@RequestParam(required = false, name = "pageNum", defaultValue = "0") int pageNum) {
+		ParkingTableResponse response = parkingTableService.searchParkingTable(request, pageNum);
+		return ResponseEntity.ok(response);
+	}
+	
+	@GetMapping(path = "/bnc/csv/read/v1/{fileName}", produces = MediaType.APPLICATION_JSON_VALUE)
+	public ResponseEntity<CSVUploadResponse> readCsvData(@PathVariable String fileName) {
+		CSVUploadResponse response = csvReaderService.readCsv(Constants.BASE_FILE_PATH,
+				fileName,
+				PIPE_DELIMETER,
+				HEADERS,
+				KEYS_TO_INSERT_IN_DB,
+				true);
+		
+		return ResponseEntity.ok(response);
+	}
+	
+	@PostMapping(path = "/bnc/upload/bank/file/v3", produces = MediaType.APPLICATION_JSON_VALUE)
+	public ResponseEntity<CSVUploadResponse> uploadBankFile(@RequestParam("file") MultipartFile file,
+			@RequestParam(required = false, name = "cmsBankCode") String cmsBankCode,
+			@RequestParam(required = false, name = "paymentMethod") String paymentMethod,
+			@RequestParam(required = false, name = "userId") String userId) {
+
+		String message = "";
+		//CSVUploadResponse response = new CSVUploadResponse();
+		String fileName = "";
+		try {
+			File directory = new File("/tmp/BankFilesUpload/");
+			if(!directory.exists()) {
+				directory.mkdirs();
+			}
+			fileName = file.getOriginalFilename();
+			FileOutputStream f = new FileOutputStream("/tmp/BankFilesUpload/"+""+file.getOriginalFilename());
+			InputStream in = file.getInputStream();
+			int ch = 0;
+			while ((ch = in.read()) != -1) {
+				f.write(ch);
+			}
+			f.flush();
+			f.close();
+			message = "Uploaded the file successfully: " + ""+file.getOriginalFilename();
+			LOGGER.info("################### BANK FILE UPLOADED MESSAGE ->"+message);
+		} catch (IOException e) {
+			message = "Could not upload the file: " + file.getOriginalFilename() + "!";
+			LOGGER.error("################### ERROR WHILE UPLOADING BANK FILE -> "+message);
+			throw new ResourceNotFoundException("E400146", new String[] { e.getLocalizedMessage() });
+		}
+		
+		BankFileReaderRequest req = new BankFileReaderRequest();
+		req.setFileName(fileName);
+		req.setCmsBankCode(cmsBankCode);
+		req.setPaymentMethod(paymentMethod);
+		req.setUserId(userId);
+		
+		return readCsvDataV2(req);
+	}	
+	
+	@PostMapping(path = "/bnc/file/read/v2", produces = MediaType.APPLICATION_JSON_VALUE)
+	public ResponseEntity<CSVUploadResponse> readCsvDataV2(@RequestBody BankFileReaderRequest request) {
+	
+		FileNameParser fnp = csvReaderService.getFileDetails(request.getFileName());
+		
+		/* cmsBank and payMethod */
+		if(receiptService.stringBlankCheck(request.getCmsBankCode())) {
+			fnp.setCmsBankCode(request.getCmsBankCode());
+		}
+		if(receiptService.stringBlankCheck(request.getPaymentMethod())) {
+			fnp.setPaymentInstrument(request.getPaymentMethod());
+		}
+		
+		CSVUploadResponse response = new CSVUploadResponse();
+		
+		String userId = request.getUserId();
+		if(StringUtils.isBlank(userId)) {
+			userId = "BANK-FILE-UPLOAD-BNC";
+		}
+		
+		if(fnp.getFileFormat().equalsIgnoreCase("csv") || fnp.getFileFormat().equalsIgnoreCase("txt")) {
+			response = csvReaderService.readFileV2(BASE_FILE_PATH, fnp, userId);
+		}
+		else if(fnp.getFileFormat().contains("xls")) {
+			response = csvReaderService.readExcelFile(BASE_FILE_PATH, fnp, userId);
+		}
+		else {
+			throw new RequestValidationException("E400162", new String[] {fnp.getFileName()} );
+		}
+		
+		//reconService.updateParkingTable();
+		return ResponseEntity.ok(response);
+	}
+	
+	@PostMapping(path = "/bnc/file/name/parser", produces = MediaType.APPLICATION_JSON_VALUE)
+	public ResponseEntity<FileNameParser> a(@RequestBody BankFileReaderRequest request) {
+	
+		FileNameParser fnp = csvReaderService.getFileDetails(request.getFileName());
+		return ResponseEntity.ok(fnp);
+	}
+	
+	@GetMapping(path = "/bnc/create/file1/v1/", produces = MediaType.APPLICATION_JSON_VALUE)
+	public ResponseEntity<String> file1service() {
+		fileLogService.createFile1();
+		return ResponseEntity.ok("File1 created successfully");
+	}
+	
+	@GetMapping(path = "/bnc/update/parking/table/v1", produces = MediaType.APPLICATION_JSON_VALUE)
+	public ResponseEntity<ParkingTableUpdateResponse> updateParkingTable() {
+		ParkingTableUpdateResponse response = reconService.updateParkingTableV2();
+		return ResponseEntity.ok(response);
+	}
+	
+	@PostMapping(path = "/bnc/receipt/submit/v1", produces = MediaType.APPLICATION_JSON_VALUE)
+	public ResponseEntity<PaymentTransactionResponse> submitReceipt(@RequestBody ReceiptCreateRequest request,
+			@RequestParam(value = "reqSrc", required = false) String reqSrc) {
+		PaymentTransactionResponse response = receiptService.submitReceiptNewV2(request, reqSrc);
+		return ResponseEntity.ok(response);
+	}
+	
+	@PostMapping(path = "/bnc/update/parking/table/status/v1", produces = MediaType.APPLICATION_JSON_VALUE)
+	public ResponseEntity<ParkingTableUpdateResponse> updateParkingTableStatus(@RequestBody UpdateStatusRequest request) {
+		ParkingTableUpdateResponse response = receiptService.updateParkingTableStatus(request);
+		return ResponseEntity.ok(response);
+	}
+	
+	
+	@PostMapping(path = "/bnc/depositslip/search/v1", produces = MediaType.APPLICATION_JSON_VALUE)
+	public ResponseEntity<DepositSlipSearchResponse> searchDepositSlip(@RequestBody DepositSlipSearch request,
+			@RequestParam(required = false, name = "pageNum", defaultValue = "0") int pageNum) {
+		DepositSlipSearchResponse response = receiptService.searchDepositSlip(request, pageNum);
+		return ResponseEntity.ok(response);
+	}
+	@PostMapping(path = "/bnc/deposit/slip/search/v1", produces = MediaType.APPLICATION_JSON_VALUE)
+	public ResponseEntity<DepositSlipResponse> depositSlipSearch(@RequestBody DepositSlipSearchRequest request) {
+		DepositSlipResponse response = receiptService.searchDepositSlips(request);
+		return ResponseEntity.ok(response);
+	}
+	@GetMapping(path = "/bnc/get/file-log/details/v1/{fileId}", produces = MediaType.APPLICATION_JSON_VALUE)
+	public ResponseEntity<FileLogResponse> getFileLogDetailsByFileId(@PathVariable String fileId) {
+		long fileIdInLong = 0;
+		try {
+			fileIdInLong = Long.parseLong(fileId);
+		} catch (NumberFormatException e) {
+			e.printStackTrace();
+			throw new ResourceNotFoundException("E40082", null);
+		}
+		FileLogResponse response = receiptService.getFileLogDataById(fileIdInLong);
+		return ResponseEntity.ok(response);
+	}
+	
+	@PostMapping(path = "/bnc/search/file-log/v1", produces = MediaType.APPLICATION_JSON_VALUE)
+	public ResponseEntity<FileLogResponse> searchFileLog(@RequestBody FileLogSearchRequest request) {
+		FileLogResponse response = receiptService.searchFileLogRecords(request);
+		return ResponseEntity.ok(response);
+	}
+
+	@PostMapping(path = "/bnc/cancel/receipt/v1", produces = MediaType.APPLICATION_JSON_VALUE)
+	public ResponseEntity<ReceiptCancelResponse> cancelReceipt(@RequestBody ReceiptCancelRequest request) {
+		ReceiptCancelResponse response = receiptService.cancelReceipt(request);
+		return ResponseEntity.ok(response);
+	}
+	
+	@PostMapping("/bnc/download/vcs/pdf/v1/")
+    public ResponseEntity<Resource> downloadVCSPDF(HttpServletRequest req, @RequestBody ValidationCallingSheet request) {
+		if(request == null) {
+			throw new ResourceNotFoundException("E40020", null);
+		}
+		
+		String fileName = "vcs"+".pdf";
+		receiptService.downloadVCSPDF(request, "./temp", fileName);
+		Resource resource = new FileSystemResource("./temp/"+fileName);
+       
+		String contentType = null;
+        try {
+            contentType = req.getServletContext().getMimeType(resource.getFile().getAbsolutePath());
+        } catch (IOException ex) {
+        	throw new RuntimeException(ex.getMessage());
+        }
+
+        if(contentType == null) {
+            contentType = "application/octet-stream";
+        }
+        return ResponseEntity.ok()
+                .contentType(MediaType.parseMediaType(contentType))
+                .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"" + resource.getFilename() + "\"")
+                .body(resource);
+    }
+	
+	//Download parking table excel sheet.
+	@PostMapping("/bnc/download/parking/table/excel/v1/")
+    public ResponseEntity<Resource> downloadExcelSheet(HttpServletRequest req, @RequestBody ParkingTableSearch request) {
+		if(request == null) {
+			throw new ResourceNotFoundException("E40020", null);
+		}
+		String fileName = "parking_table.xlsx";
+		receiptService.downloadParkingTableExcelSheet(request, "./temp", fileName);
+		Resource resource = new FileSystemResource("./temp/"+fileName);
+       
+		String contentType = null;
+        try {
+            contentType = req.getServletContext().getMimeType(resource.getFile().getAbsolutePath());
+        } catch (IOException ex) {
+        	throw new RuntimeException(ex.getMessage());
+        }
+
+        if(contentType == null) {
+            contentType = "application/octet-stream";
+        }
+        return ResponseEntity.ok()
+                .contentType(MediaType.parseMediaType(contentType))
+                .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"" + resource.getFilename() + "\"")
+                .body(resource);
+    }
+	
+	//Transfer of fund
+	@Transactional
+	@PostMapping(path = "/bnc/fund/transfer/v1", produces = MediaType.APPLICATION_JSON_VALUE)
+	public ResponseEntity<PaymentTransactionResponse> transferOfFund(@RequestBody TransferFundRequest request) {
+		PaymentTransactionResponse response = receiptService.transferFundRequest(request);
+		return ResponseEntity.ok(response);
+	}
+	
+	//Cheque bounce
+	@PostMapping(path = "/bnc/cheque/bounce/details/v1", produces = MediaType.APPLICATION_JSON_VALUE)
+	public ResponseEntity<ChequeBounceResponse> chequeBounce(@RequestBody ChequeBounceRequest request) {
+		ChequeBounceResponse response = receiptService.chequeBounce(request.getReceipt_id());
+		return ResponseEntity.ok(response);
+	}
+	
+	//Cheque bounce cover letter
+	@PostMapping(path = "/bnc/download/cheque/bounce/cover/letter/v1", produces = MediaType.APPLICATION_JSON_VALUE)
+	 public ResponseEntity<Resource> downloadChequeBounce(HttpServletRequest req, @RequestBody ChequeBounceRequest request) {
+		if(request == null) {
+			throw new ResourceNotFoundException("E40020", null);
+		}
+		String fileName = "cover_letter.pdf";
+		receiptService.downloadChequeBounceCoverLetter(request.getReceipt_id(),fileName, "./temp");
+		
+		Resource resource = new FileSystemResource("./temp/"+fileName);
+       
+		String contentType = null;
+        try {
+            contentType = req.getServletContext().getMimeType(resource.getFile().getAbsolutePath());
+        } catch (IOException ex) {
+        	throw new RuntimeException(ex.getMessage());
+        }
+
+        if(contentType == null) {
+            contentType = "application/octet-stream";
+        }
+        return ResponseEntity.ok()
+                .contentType(MediaType.parseMediaType(contentType))
+                .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"" + resource.getFilename() + "\"")
+                .body(resource);
+	}
+	
+	
+	//save cheque bounce updates
+	@PostMapping(path = "/bnc/save/update/details/v1", produces = MediaType.APPLICATION_JSON_VALUE)
+	public ResponseEntity<ChequeBounceUpdateDetailsResponse> saveChequeUpdateDetails(@RequestBody ChequeBounceUpdateDetailsRequest request) {
+		ChequeBounceUpdateDetailsResponse response = receiptService.createEntityAndSaveChequeBounceUpdateDetails(request);
+		return ResponseEntity.ok(response);
+	}
+	//Get cheque bounce updates details
+	@PostMapping(path = "/bnc/get/update/details/v1", produces = MediaType.APPLICATION_JSON_VALUE)
+	public ResponseEntity<ChequeBounceUpdateDetailsResponse> getChequeUpdateDetails(@RequestBody ChequeBounceUpdateDetailsRequest request) {
+		ChequeBounceUpdateDetailsResponse response = receiptService.fetchDataChequeBounceUpdateDetails(request);
+		return ResponseEntity.ok(response);
+	}
+	
+	@GetMapping(path = "/bnc/refund/file/creation/v1", produces = MediaType.APPLICATION_JSON_VALUE)
+	public ResponseEntity<Map<String,String>> refundFileCreation() {
+		
+		/* old-impl of refund file: For backward compatibility if needed */
+		/*
+		 * String fileName = "refund_file_"+Instant.now().getEpochSecond()+".xlsx";
+		 * Map<String,String> response = receiptService.createRefundFile(fileName);
+		 */
+		Map<String,String> response = accountingService.createAccountingExtractFile();
+		
+		return ResponseEntity.ok(response);
+	}
+	
+	@GetMapping(path = "/bnc/policy/status/ingenium/v1/{policyNumber}", produces = MediaType.APPLICATION_JSON_VALUE)
+	public ResponseEntity<Map<String,String>> policyStatusFromIngenium(@PathVariable String policyNumber) {
+		
+		Map<String,String> response = receiptService.checkPolicyStatusFromIngenium(policyNumber);
+		
+		return ResponseEntity.ok(response);
+	}
+	
+	@GetMapping(path = "/gen/dep/slip/num/v1/{hubCode}/{cmsBankCode}/{instrumentId}", produces = MediaType.APPLICATION_JSON_VALUE)
+	public ResponseEntity<String> genDepSlipNo(@PathVariable String hubCode, @PathVariable String cmsBankCode, @PathVariable String instrumentId) {
+		String depSlipNo = receiptService.generateDepositSlipNum(instrumentId, hubCode, cmsBankCode);
+		
+		return ResponseEntity.ok(depSlipNo);
+	}
+	
+	@GetMapping(path = "/bnc/auto/approve/receipt/conditions/v1/{applicationNumber}", produces = MediaType.APPLICATION_JSON_VALUE)
+	public ResponseEntity<ApproveReceiptResponse> autoApproveReceipts(
+			@RequestParam(value = "userId", required = false) String userId,
+			@RequestParam(value = "reqSrc", required = false) String reqSrc,
+			@PathVariable String applicationNumber) {
+		if(StringUtils.isBlank(userId)) {
+			userId = AUTO_APPROVAL_BNC;
+		}
+		ApproveReceiptResponse response = receiptService.autoApproveReceiptConditionsV2(applicationNumber, userId, reqSrc);
+		return ResponseEntity.ok(response);
+	}
+	
+	@PostMapping(path = "/bnc/auto/approve/receipt/conditions/v2", produces = MediaType.APPLICATION_JSON_VALUE)
+	public ResponseEntity<ApproveReceiptResponse> autoApproveReceiptsV2(@RequestBody ReceiptApprovalRequest request) {
+		if(request == null || StringUtils.isBlank(request.getApplicationNumber())) {
+			throw new RequestValidationException("E400208", new String[] {"applicationNumber"});
+		}
+		
+		ApproveReceiptResponse response = receiptService.autoApproveReceiptConditionsV2(request.getApplicationNumber(), request.getUsername(), "");
+		return ResponseEntity.ok(response);
+	}
+	
+	@GetMapping(path = "/bnc/manual/approve/receipt/v1/{applicationNumber}", produces = MediaType.APPLICATION_JSON_VALUE)
+	public ResponseEntity<ApproveReceiptResponse> manualApproveReceipts(
+			@RequestParam(value = "userId", required = false) String userId,
+			@PathVariable String applicationNumber) {
+		if(StringUtils.isBlank(userId)) {
+			userId = MANUAL_APPROVAL_BNC;
+		}
+		
+		ApproveReceiptResponse response = receiptService.manualApproveReceiptsV2(applicationNumber, userId);
+		return ResponseEntity.ok(response);
+	}
+	
+	
+	@GetMapping(path = "/bnc/manual/approve/receipt/v2/{paymentTxId}", 
+			produces = MediaType.APPLICATION_JSON_VALUE)
+	public ResponseEntity<ApproveReceiptResponse> manualApproveReceiptsV1(
+			@RequestParam(value = "userId", required = false) String userId,
+			@PathVariable String paymentTxId) {
+		
+		if(StringUtils.isBlank(userId)) {
+			userId = MANUAL_APPROVAL_BNC;
+		}
+		
+		ApproveReceiptResponse response = receiptService.manualApproveReceiptsV3(paymentTxId, userId);
+		return ResponseEntity.ok(response);
+	}
+	
+	@PostMapping(path = "/bnc/manual/approve/receipt/v2", produces = MediaType.APPLICATION_JSON_VALUE)
+	public ResponseEntity<ApproveReceiptResponse> manualApproveReceiptsV2(@RequestBody ReceiptApprovalRequest request) {
+		if(request == null || StringUtils.isBlank(request.getApplicationNumber())) {
+			throw new RequestValidationException("E400208", new String[] {"applicationNumber"});
+		}
+		ApproveReceiptResponse response = receiptService.manualApproveReceiptsV2(request.getApplicationNumber(), request.getUsername());
+		return ResponseEntity.ok(response);
+	}
+	
+	@GetMapping(path = "/bnc/manual/approve/workflow/submit/receipt/v1/{applicationNumber}", produces = MediaType.APPLICATION_JSON_VALUE)
+	public ResponseEntity<ApproveReceiptResponse> manualApproveReceiptsWithWorkflowSubmit(@PathVariable String applicationNumber) {
+		ApproveReceiptResponse response = receiptService.manualApproveReceiptsWithWorkflowSubmit(applicationNumber);
+		return ResponseEntity.ok(response);
+	}
+	
+	@PostMapping(path = "/bnc/bulk/receipt/create/v1", produces = MediaType.APPLICATION_JSON_VALUE)
+	public ResponseEntity<CSVUploadResponse> bulkReceipting(@RequestBody BankFileReaderRequest request) {
+	
+		FileNameParser fnp = csvReaderService.getBulkFileDetails(request.getFileName());
+		
+		CSVUploadResponse response = new CSVUploadResponse();
+		
+		if(fnp.getFileFormat().contains("xls")) {
+			response = receiptService.bulkReceiptCreation(fnp, "");
+		}
+		else {
+			throw new RequestValidationException("E400158", new String[] {fnp.getFileFormat()});
+		}
+		
+		return ResponseEntity.ok(response);
+	}
+	
+
+	@DeleteMapping(path = "/bnc/delete/receipt/v1/{applicationNumber}", produces = MediaType.APPLICATION_JSON_VALUE)
+	public ResponseEntity<DeleteReceiptsResponse> deleteAllDataForApllicationNumber(@PathVariable String applicationNumber) {
+		DeleteReceiptsResponse response = receiptService.deleteReceiptDataByApplicationNumber(applicationNumber);
+		return ResponseEntity.ok(response);
+	}
+	
+	
+	@GetMapping(path = "/bnc/generate/receipt/v1/{applicationNumber}", produces = MediaType.APPLICATION_JSON_VALUE)
+	public ResponseEntity<PaymentTransactionResponse> createReceiptByApplicationNo(@PathVariable String applicationNumber) {
+		PaymentTransactionResponse response = receiptService.createReceiptRequestFromProposalForm(applicationNumber);
+		return ResponseEntity.ok(response);
+	}
+	
+	//to test kafka service
+	@GetMapping(path = "/bnc/test/fep/update/receipt/status/v1/{appNum}/{approvedBy}/{receiptStatus}/{receiptID}", produces = MediaType.APPLICATION_JSON_VALUE)
+	public ResponseEntity<String> testFEP(@PathVariable String appNum, @PathVariable String approvedBy, @PathVariable String receiptStatus, @PathVariable String receiptID) {
+		String response = receiptService.updateReceiptStatusFEP(appNum, approvedBy, receiptStatus, receiptID);
+		return ResponseEntity.ok(response);
+	}
+	
+	//to test kafka service
+	@GetMapping(path = "/bnc/test/fep/push/xml/data/v1/{appNum}/{batchDate}/{source}", produces = MediaType.APPLICATION_JSON_VALUE)
+	public ResponseEntity<String> testPushXMLToFEP(@PathVariable String appNum, @PathVariable String batchDate, @PathVariable String source) {
+		String response = receiptService.pushXMLDataToFEP(appNum, batchDate, source);
+		return ResponseEntity.ok(response);
+	}
+	
+	@PostMapping(path = "/bnc/renewal/premium/date/validation/logic/v1", produces = MediaType.APPLICATION_JSON_VALUE)
+	public ResponseEntity<RenewalValidationResponse> renewalValidation(@RequestBody RenewalValidationReq request) {
+		
+		if(request == null || request.getReceiptTimestamp() == null || request.getPolicyNumber() == null) {
+			throw new RequestValidationException("E40020", null);
+		}
+		
+		RenewalValidationResponse response = renewalService.renewalTimeValidationsCheck(request.getReceiptTimestamp(), request.getPolicyNumber());
+
+		return ResponseEntity.ok(response);
+	}
+	
+
+	@PostMapping(path = "/bnc/vb/guideline/v1", produces = MediaType.APPLICATION_JSON_VALUE)
+	public ResponseEntity<VBGuidelineValidationResponse> gvalidateVBGuidelines(@RequestBody VBGuidelineValidationRequest request) {
+		VBGuidelineValidationResponse response = receiptService.validationSection64(request.getReceiptTimestamp(), request.getInstrumentDate(), request.getPaymentMode());
+		return ResponseEntity.ok(response);
+	}
+	 
+	@PostMapping(path = "/bnc/upload/excel/bulk/receipt/v1", produces = MediaType.APPLICATION_JSON_VALUE)
+	public ResponseEntity<CSVUploadResponse> uploadFile(@RequestParam("file") MultipartFile file,
+			@RequestParam(required = false, name = "username") String username) {
+		CSVUploadResponse response = new CSVUploadResponse();
+		if(StringUtils.isBlank(username)) {
+			username = "";
+		}
+		response = receiptService.uploadBulkReceiptingExcelFile(file, username);
+		return ResponseEntity.ok(response);
+	}
+	
+	@PostMapping(path = "/bnc/push/si-nach/data/ingenium/v1", produces = MediaType.APPLICATION_JSON_VALUE)
+	public ResponseEntity<String> pushSiNachData(@RequestBody PushSiNachDataRequest request) {
+		if(StringUtils.isBlank(request.getApplicationNo()) || StringUtils.isBlank(request.getSource()) 
+				|| StringUtils.isBlank(request.getHubCode())
+				|| StringUtils.isBlank(request.getUserId())) {
+			throw new RequestValidationException("E40020", null);
+		}
+		
+		String response = receiptService.pushSiNachDataToKafka(request.getApplicationNo(), request.getSource(), request.getUserId(), request.getHubCode());
+		return ResponseEntity.ok(response);
+	}
+	
+	@PostMapping(path = "/bnc/save/return/instrument/details/v1", produces = MediaType.APPLICATION_JSON_VALUE)
+	public ResponseEntity<ReturnInstDetailResponse> saveReturnInstData(@RequestBody ReturnInstDetailReq request) {
+		if(request == null) {
+			throw new RequestValidationException("E40020", null);
+		}
+		ReturnInstDetailResponse response = receiptService.saveReturnInstData(request);
+		return ResponseEntity.ok(response);
+	}
+	
+	@GetMapping(path = "/bnc/get/return/instrument/details/v1/{instrumentNumber}", produces = MediaType.APPLICATION_JSON_VALUE)
+	public ResponseEntity<ReturnInstDetailResponse> getReturnInstData(@PathVariable String instrumentNumber) {
+		ReturnInstDetailResponse response = receiptService.getReturnInstrumentDetails(instrumentNumber);
+		return ResponseEntity.ok(response);
+	}
+	
+	@PostMapping(path = "/bnc/fetch/application/data/ingenium/v1", produces = MediaType.APPLICATION_JSON_VALUE)
+	public ResponseEntity<RenewalValidationResponse> trackAppDataFromIngenium(@RequestBody RenewalValidationReq request) {
+		
+		if(request == null || request.getPolicyNumber() == null) {
+			throw new RequestValidationException("E40020", null);
+		}
+		
+		RenewalValidationResponse response = renewalService.trackAppDataFromIngenium(request.getPolicyNumber());
+
+		return ResponseEntity.ok(response);
+	}
+	
+	@GetMapping(path = "/bnc/get/file/log/data/v1", produces = MediaType.APPLICATION_JSON_VALUE)
+	public ResponseEntity<FileLogAllDataResponse> getAllFileLogData() {
+		FileLogAllDataResponse response = fileLogService.getAllFileLogData();
+		return ResponseEntity.ok(response);
+	}
+	
+	@GetMapping(path = "/bnc/get/bulk/receipt/log/data/v1", produces = MediaType.APPLICATION_JSON_VALUE)
+	public ResponseEntity<BulkReceiptLogAllDataResponse> getBulkReceiptFileLogData() {
+		BulkReceiptLogAllDataResponse response = fileLogService.getAllBulkReceiptLogData();
+		return ResponseEntity.ok(response);
+	}
+
+	@GetMapping("/bnc/download/file/log/v1/{fileId}")
+    public ResponseEntity<Resource> downloadFileLog(HttpServletRequest request,
+    		@PathVariable(value = "fileId") long fileId) {
+		if(request == null) {
+			throw new ResourceNotFoundException("E40020", null);
+		}
+		
+		FileLogEntity fetchedRecord = fileLogRepository.findByFile_Id(fileId);
+		
+		if (fetchedRecord == null){
+			throw new ResourceNotFoundException("E400150", new String[] {String.valueOf(fileId)} );
+		}
+		
+		if (!receiptService.stringBlankCheck(fetchedRecord.getError_file_path())) {
+			throw new ResourceNotFoundException("E400149", new String[] {fetchedRecord.getError_file_path()} );
+		}
+		
+		/* fetch file from s3 key */
+		String localPathOfFile = awsService.fetchFileFromS3SaveOnLocal("/tmp/", fetchedRecord.getError_file_path());
+		if(!receiptService.stringBlankCheck(localPathOfFile)) {
+			throw new ResourceNotFoundException("E400204", new String[] {fetchedRecord.getError_file_path()});
+		}
+		
+		File directory = new File(localPathOfFile);
+		if(!directory.exists()) {
+			throw new ResourceNotFoundException("E400149", new String[] {fetchedRecord.getError_file_path()} );
+		}
+		
+		Resource resource = new FileSystemResource(localPathOfFile);
+
+        String contentType = null;
+        try {
+            contentType = request.getServletContext().getMimeType(resource.getFile().getAbsolutePath());
+        } catch (IOException ex) {
+        	throw new RuntimeException(ex.getMessage());
+        }
+
+        if(contentType == null) {
+            contentType = "application/octet-stream";
+        }
+
+        return ResponseEntity.ok()
+                .contentType(MediaType.parseMediaType(contentType))
+                .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"" + resource.getFilename() + "\"")
+                .body(resource);
+    }
+	
+	@GetMapping("/bnc/download/bulk/receipt/file/log/v1/{fileId}")
+    public ResponseEntity<Resource> downloadBulkReceiptFileLog(HttpServletRequest request,
+    		@PathVariable(value = "fileId") long fileId) {
+		if(request == null) {
+			throw new ResourceNotFoundException("E40020", null);
+		}
+		
+		BulkReceiptFileEntity fetchedRecord = bulkReceiptRepo.findByFile_Id(fileId);
+		
+		if (fetchedRecord == null){
+			throw new ResourceNotFoundException("E400150", new String[] {String.valueOf(fileId)} );
+		}
+		
+		if (!receiptService.stringBlankCheck(fetchedRecord.getError_file_path())) {
+			throw new ResourceNotFoundException("E400149", new String[] {fetchedRecord.getError_file_path()} );
+		}
+		
+		/* fetch file from s3 key */
+		String localPathOfFile = awsService.fetchFileFromS3SaveOnLocal("/tmp/", fetchedRecord.getError_file_path());
+		if(!receiptService.stringBlankCheck(localPathOfFile)) {
+			throw new ResourceNotFoundException("E400204", new String[] {fetchedRecord.getError_file_path()});
+		}
+		
+		File directory = new File(localPathOfFile);
+		if(!directory.exists()) {
+			throw new ResourceNotFoundException("E400149", new String[] {fetchedRecord.getError_file_path()} );
+		}
+		
+		Resource resource = new FileSystemResource(localPathOfFile);
+
+        String contentType = null;
+        try {
+            contentType = request.getServletContext().getMimeType(resource.getFile().getAbsolutePath());
+        } catch (IOException ex) {
+        	throw new RuntimeException(ex.getMessage());
+        }
+
+        if(contentType == null) {
+            contentType = "application/octet-stream";
+        }
+
+        return ResponseEntity.ok()
+                .contentType(MediaType.parseMediaType(contentType))
+                .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"" + resource.getFilename() + "\"")
+                .body(resource);
+    }
+	
+	@GetMapping(path = "/bnc/ingenium/loan/amount/v1/{policyNumber}", produces = MediaType.APPLICATION_JSON_VALUE)
+	public ResponseEntity<String> getLoanAmountFromIngenium(@PathVariable String policyNumber) {
+		ResponseEntity<String> response = restTemplate.getRequestIngeniumService(ingeniumLoanAmtURI+ policyNumber);
+		return response;
+
+	}
+	
+	@GetMapping(path = "/bnc/ingenium/topup/v1/{policyNumber}", produces = MediaType.APPLICATION_JSON_VALUE)
+	public ResponseEntity<String> getTopupDataFromIngenium(@PathVariable String policyNumber) {
+		ResponseEntity<String> response = restTemplate.getRequestIngeniumService(ingeniumTopupURI+ policyNumber);
+		return response;
+	}
+	
+	@GetMapping(path = "/bnc/ingenium/renewal/cptd/ptd/data/v1/{policyNumber}", produces = MediaType.APPLICATION_JSON_VALUE)
+	public ResponseEntity<String> getCptdPtdDataFromIngenium(@PathVariable String policyNumber) {
+		ResponseEntity<String> response = restTemplate.getRequestIngeniumService(ingeniumServiceCPD_PTDUri + policyNumber);
+		return response;
+	}
+	
+	@GetMapping(path = "/bnc/mis/file/creation/v1", produces = MediaType.APPLICATION_JSON_VALUE)
+	public ResponseEntity<Map<String,String>> MISFileCreation() {
+		Map<String,String> response = misGenerationService.createMISFile();
+		return ResponseEntity.ok(response);
+	}
+	
+	@PostMapping(path = "/bnc/fetch/bank/details/v1", produces = MediaType.APPLICATION_JSON_VALUE)
+	public ResponseEntity<BankDetailResponse> getBankDetailsByIfscMicr(@RequestBody BankDetailReq request) {
+		long startTime = Instant.now().getEpochSecond();
+		if(request == null || !receiptService.stringBlankCheck(request.getBankInd()) || !receiptService.stringBlankCheck(request.getMicrOrifscCode())) {
+			throw new RequestValidationException("E40020", null);
+		}
+		BankDetailResponse response = new BankDetailResponse();
+		IngMicrIfscResp innerResp = receiptService.fetchBankDetailsByIfscMicr(request);
+		
+		response.setStatusCode("L20061");
+		response.setStatusMessage(getDataFromProperty("L20061"));
+		response.setVersion(VERSION_V1);
+		response.setTimeTakenForResponse(String.valueOf(Instant.now().getEpochSecond() - startTime));
+		response.setResponse(innerResp);
+		
+		return ResponseEntity.ok(response);
+	}
+
+	@GetMapping("/bnc/download/receipts/pending/v1")
+    public ResponseEntity<Resource> downloadFileLog(HttpServletRequest request) {
+		if(request == null) {
+			throw new ResourceNotFoundException("E40020", null);
+		}
+		
+		String filePath = "./temp/PendingReceiptData/";
+		String fileName = "PendingReceipts_"+Instant.now()+".xlsx";
+		
+		pendingReceiptFileGen.createPendingReceiptsDataFile(filePath, fileName);
+		
+		Resource resource = new FileSystemResource(filePath+fileName);
+
+        String contentType = null;
+        try {
+            contentType = request.getServletContext().getMimeType(resource.getFile().getAbsolutePath());
+        } catch (IOException ex) {
+        	throw new RuntimeException(ex.getMessage());
+        }
+
+        if(contentType == null) {
+            contentType = "application/octet-stream";
+        }
+
+        return ResponseEntity.ok()
+                .contentType(MediaType.parseMediaType(contentType))
+                .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"" + resource.getFilename() + "\"")
+                .body(resource);
+    }
+	
+	@GetMapping(path = "/bnc/trigger/bank-file/uploader/process/s3/v1", produces = MediaType.APPLICATION_JSON_VALUE)
+	public ResponseEntity<Map<String,String>> triggerBankUploadProcess() {
+		Map<String,String> response = new HashMap<String,String>();
+		
+		timeScheduledService.awsS3BankFileReaderAndParkingTableInsert();
+		
+		response.put("statusCode", "L20063");
+		response.put("statusMessage", getDataFromProperty("L20063"));
+		response.put("version", VERSION_V1);
+		//response.put("response", "File uploader process from s3 triggered successfully");
+		
+		return ResponseEntity.ok(response);
+	}
+	
+	@GetMapping(path = "/bnc/download/direct-debit/pending/recon/data/v1", produces = MediaType.APPLICATION_JSON_VALUE)
+	public ResponseEntity<Resource> downloadDirDebitFiles(HttpServletRequest request) throws IOException {
+		JSONObject fileJSON = new JSONObject();
+		String encodedString = "";
+		File zipFile = null;
+		
+		try {
+			List<String> fileNameList = dirDebFileGenService.createAllDirDebFiles();
+			
+			zipFile = dirDebFileGenService.createZIP(fileNameList, "DirectDebitPending.zip");
+
+			fileJSON.put("encodedDocument", encodedString);
+			
+			Resource resource = new FileSystemResource(zipFile.getAbsolutePath());
+
+	        String contentType = null;
+	        try {
+	            contentType = request.getServletContext().getMimeType(resource.getFile().getAbsolutePath());
+	        } catch (IOException ex) {
+	        	throw new RuntimeException(ex.getMessage());
+	        }
+
+	        if(contentType == null) {
+	            contentType = "application/octet-stream";
+	        }
+
+	        return ResponseEntity.ok()
+	                .contentType(MediaType.parseMediaType(contentType))
+	                .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"" + resource.getFilename() + "\"")
+	                .body(resource);
+		}
+		finally {
+			/*
+			 * if(zipFile != null && zipFile.exists()) { zipFile.delete(); }
+			 */
+		}
+
+	}
+	
+	@GetMapping("/bnc/get/generated/deposit/slip/pdf/v2/{depositSlipId}")
+    public ResponseEntity<Resource> downloadAlreadyGeneratedDepositSlip(HttpServletRequest req,
+    		 @PathVariable String depositSlipId) {
+		
+		if(StringUtils.isBlank(depositSlipId)) {
+			throw new RuntimeException("Mandatory parameter depositSlipId is missing in request");
+		}
+		
+		List<PaymentInstrumentEntity> pieListForDepSlip = paymentInstrumentRepo.findByDepSlipNumber(depositSlipId);
+		if(pieListForDepSlip == null || pieListForDepSlip.size() <=0 ) {
+			throw new RuntimeException("No Payment-Instruments found for the provided depositSlipId: "+ depositSlipId+ " Provide a valid depositSlipId");
+		}
+		
+		List<String> instIdList = new ArrayList<String>();
+		pieListForDepSlip.forEach(p -> instIdList.add(p.getPayment_inst_id()));
+		String instIdFirst = instIdList.get(0);
+		
+		String fileName = instIdFirst+"-deposit-slip"+".pdf";
+		RetailCash depositSlipData = new RetailCash();
+		
+		String payMethod = pieListForDepSlip.get(0).getPayment_mode();
+		if(!PaymentMethodUtility.isChequeOrDDLocalOrOutstation(payMethod) && !payMethod.equalsIgnoreCase(PAYMENT_METHOD_CASH)) {
+			throw new RuntimeException("Deposit Slip PDF generation is not supported for payment methods other than cheque, DD and cash");
+		}
+		
+		depositSlipData = receiptService.getDepositSlipPojosForReceiptList(depositSlipId, 
+				instIdList, payMethod);
+		receiptService.generateDepositeSlipPDF(depositSlipData, false, payMethod, 
+				fileName, "./temp");
+		Resource resource = new FileSystemResource("./temp/"+fileName);
+        String contentType = null;
+        try {
+            contentType = req.getServletContext().getMimeType(resource.getFile().getAbsolutePath());
+        } catch (IOException ex) {
+        	throw new RuntimeException(ex.getMessage());
+        }
+
+        if(contentType == null) {
+            contentType = "application/octet-stream";
+        }
+
+        return ResponseEntity.ok()
+                .contentType(MediaType.parseMediaType(contentType))
+                .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"" + resource.getFilename() + "\"")
+                .body(resource);
+	}
+	
+	@PostMapping("/bnc/get/generated/deposit/slip/pdf/v3/{depositSlipId}")
+    public ResponseEntity<Resource> downloadAlreadyGeneratedDepositSlipV3(HttpServletRequest req, @RequestBody DepositSlipPdfRequest request,
+    		 @PathVariable String depositSlipId) {
+		
+		if(StringUtils.isBlank(depositSlipId)) {
+			throw new RuntimeException("Mandatory parameter depositSlipId is missing in request");
+		}
+		
+		if(request.getInstrumentIdList() == null || request.getInstrumentIdList().size() == 0 || StringUtils.isBlank(request.getPaymentMethod())) {
+			throw new RuntimeException("Mandatory paramter Instrument-Id list OR paymentMethod is empty in request body");
+		}
+		
+		String instIdFirst = request.getInstrumentIdList().get(0);
+		
+		String fileName = instIdFirst+"-deposit-slip"+".pdf";
+		RetailCash depositSlipData = new RetailCash();
+		
+		String payMethod = request.getPaymentMethod();
+		if(!PaymentMethodUtility.isChequeOrDDLocalOrOutstation(payMethod) && !payMethod.equalsIgnoreCase(PAYMENT_METHOD_CASH)) {
+			throw new RuntimeException("Deposit Slip PDF generation is not supported for payment methods other than cheque, DD and cash");
+		}
+		
+		depositSlipData = receiptService.getDepositSlipPojosForReceiptList(depositSlipId, 
+				request.getInstrumentIdList(), payMethod);
+		receiptService.generateDepositeSlipPDF(depositSlipData, false, payMethod, 
+				fileName, "./temp");
+		Resource resource = new FileSystemResource("./temp/"+fileName);
+        String contentType = null;
+        try {
+            contentType = req.getServletContext().getMimeType(resource.getFile().getAbsolutePath());
+        } catch (IOException ex) {
+        	throw new RuntimeException(ex.getMessage());
+        }
+
+        if(contentType == null) {
+            contentType = "application/octet-stream";
+        }
+
+        return ResponseEntity.ok()
+                .contentType(MediaType.parseMediaType(contentType))
+                .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"" + resource.getFilename() + "\"")
+                .body(resource);
+	}
+	
+	@GetMapping(path = "/bnc/check/policy/exists/v1/{policyNumber}", produces = MediaType.APPLICATION_JSON_VALUE)
+	public ResponseEntity<Map<String,Object>> checkPolicyExists(@PathVariable String policyNumber) {
+		Map<String,Object> response = receiptService.loanRepaymentPolicyCheck(policyNumber);
+		return ResponseEntity.ok(response);
+	}
+	
+	@GetMapping(path = "/bnc/set-file1-batch-status/v1/{flag}", produces = MediaType.APPLICATION_JSON_VALUE)
+	public ResponseEntity<Map<String,Object>> setFile1BatchStatus(@PathVariable String flag) {
+		Map<String,Object> response = file1Service.updateFile1BatchStatus(flag);
+		return ResponseEntity.ok(response);
+	}
+	
+	/* fetch constant value from message.prop */
+	public String getDataFromProperty(String property) {
+		return messageSource.getMessage(property, null, LocaleContextHolder.getLocale());
+	}
+}

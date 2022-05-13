@@ -1,0 +1,8 @@
+package com.example.demo.topic;
+
+public class Snippet {
+	public static void main(String[] args) {
+		Kafka_Example
+	}
+}
+
